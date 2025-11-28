@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gait Analysis Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚶‍♂️ Gait Analysis System</h1>
+            <div class="status-bar">
+                <span id="status-indicator" class="status-indicator">●</span>
+                <span id="status-text">Initializing...</span>
+                <span class="system-time" id="current-time"></span>
+            </div>
+        </header>
+
+        <main>
+            <!-- Recording Controls -->
+            <section class="control-panel">
+                <h2>Recording Controls</h2>
+                <div class="recording-controls">
+                    <div class="input-group">
+                        <label for="duration">Duration (seconds):</label>
+                        <input type="number" id="duration" value="15" min="5" max="60">
+                    </div>
+                    <div class="input-group">
+                        <label for="subject-id">Subject ID:</label>
+                        <input type="text" id="subject-id" value="default" placeholder="Enter subject ID">
+                    </div>
+                    <div class="button-group">
+                        <button id="start-recording" class="btn btn-primary">Start Recording</button>
+                        <button id="stop-recording" class="btn btn-secondary" disabled>Stop Recording</button>
+                        <button id="analyze-recording" class="btn btn-success" disabled>Analyze Walk</button>
+                    </div>
+                </div>
+                <div id="recording-status" class="recording-status"></div>
+            </section>
+
+            <!-- Latest Analysis Results -->
+            <section class="results-panel">
+                <h2>Latest Analysis</h2>
+                <div id="latest-results" class="results-grid">
+                    <div class="metric-card">
+                        <h3>Average Speed</h3>
+                        <div class="metric-value" id="avg-speed">-</div>
+                        <div class="metric-unit">units/s</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Duration</h3>
+                        <div class="metric-value" id="duration-value">-</div>
+                        <div class="metric-unit">seconds</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Stride Variability</h3>
+                        <div class="metric-value" id="stride-variability">-</div>
+                        <div class="metric-unit">CV</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Speed Variability</h3>
+                        <div class="metric-value" id="speed-variability">-</div>
+                        <div class="metric-unit">CV</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Charts -->
+            <section class="charts-panel">
+                <div class="chart-row">
+                    <div class="chart-container">
+                        <h3>Gait Speed Over Time</h3>
+                        <canvas id="speed-chart"></canvas>
+                    </div>
+                    <div class="chart-container">
+                        <h3>Baseline Comparison (Z-Scores)</h3>
+                        <canvas id="baseline-chart"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Walk History -->
+            <section class="history-panel">
+                <h2>Walk History</h2>
+                <div class="history-controls">
+                    <button id="refresh-history" class="btn btn-secondary">Refresh</button>
+                    <button id="reset-baseline" class="btn btn-warning">Reset Baseline</button>
+                </div>
+                <div id="walk-history" class="walk-history"></div>
+            </section>
+        </main>
+
+        <!-- Loading Modal -->
+        <div id="loading-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="spinner"></div>
+                <p id="loading-text">Processing...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
