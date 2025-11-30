@@ -27,8 +27,8 @@ class PoseEstimator:
     """
 
     def __init__(self,
-                 min_detection_confidence: float = 0.5,
-                 min_tracking_confidence: float = 0.5):
+                 min_detection_confidence: float = 0.3,
+                 min_tracking_confidence: float = 0.3):
         """
         Initialize pose estimation model.
 
@@ -122,15 +122,15 @@ class PoseEstimator:
             print(f"Error in pose estimation: {e}")
             return False, None
 
-    def is_pose_valid(self, keypoints: Dict, min_visibility: float = 0.3) -> bool:
+    def is_pose_valid(self, keypoints: Dict, min_visibility: float = 0.2) -> bool:
         """
         Check if detected pose is valid for gait analysis.
-        SIMPLE VERSION - like yesterday that worked perfectly.
+        More lenient for demo - prioritize tracking over precision.
         """
         if keypoints is None:
             return False
 
-        # SIMPLE CHECK - just verify required joints exist and are visible
+        # Check required joints exist and are minimally visible
         required_joints = ['left_hip', 'right_hip', 'left_ankle', 'right_ankle']
 
         for joint in required_joints:
@@ -139,7 +139,7 @@ class PoseEstimator:
             if keypoints[joint]['visibility'] < min_visibility:
                 return False
 
-        return True  # THAT'S IT - no complex validation like yesterday
+        return True
 
     def _validate_pose_geometry(self, keypoints: Dict) -> bool:
         """
@@ -317,14 +317,14 @@ class PoseEstimator:
 
     def draw_skeleton(self, frame: np.ndarray, keypoints: Dict) -> np.ndarray:
         """
-        Draw pose skeleton overlay on frame for visualization.
+        Draw enhanced pose skeleton overlay with joint labels for demo.
 
         Args:
             frame: Input BGR frame
             keypoints: Keypoints from estimate_pose()
 
         Returns:
-            np.ndarray: Frame with skeleton overlay
+            np.ndarray: Frame with skeleton overlay and labels
         """
         if keypoints is None:
             return frame
@@ -339,12 +339,7 @@ class PoseEstimator:
             y = int(joint_data['y'] * h)
             pixel_keypoints[joint_name] = (x, y)
 
-        # Draw joints as circles
-        for joint_name, (x, y) in pixel_keypoints.items():
-            color = (0, 255, 0)  # Green for joints
-            cv2.circle(overlay, (x, y), 5, color, -1)
-
-        # Draw connections between joints
+        # Draw connections between joints with thicker lines
         connections = [
             ('left_hip', 'right_hip'),      # Hip line
             ('left_hip', 'left_knee'),      # Left leg
@@ -357,7 +352,41 @@ class PoseEstimator:
             if joint1 in pixel_keypoints and joint2 in pixel_keypoints:
                 pt1 = pixel_keypoints[joint1]
                 pt2 = pixel_keypoints[joint2]
-                cv2.line(overlay, pt1, pt2, (255, 0, 0), 2)  # Blue lines
+                cv2.line(overlay, pt1, pt2, (0, 255, 255), 4)  # Bright yellow lines
+
+        # Draw joints with different colors and labels
+        joint_labels = {
+            'left_hip': 'L Hip',
+            'right_hip': 'R Hip',
+            'left_knee': 'L Knee',
+            'right_knee': 'R Knee',
+            'left_ankle': 'L Ankle',
+            'right_ankle': 'R Ankle'
+        }
+
+        joint_colors = {
+            'left_hip': (255, 0, 0),    # Blue
+            'right_hip': (255, 0, 0),   # Blue
+            'left_knee': (0, 255, 0),   # Green
+            'right_knee': (0, 255, 0),  # Green
+            'left_ankle': (0, 0, 255),  # Red
+            'right_ankle': (0, 0, 255)  # Red
+        }
+
+        for joint_name, (x, y) in pixel_keypoints.items():
+            color = joint_colors.get(joint_name, (255, 255, 255))
+
+            # Draw joint circle
+            cv2.circle(overlay, (x, y), 8, color, -1)
+            cv2.circle(overlay, (x, y), 8, (255, 255, 255), 2)  # White border
+
+            # Draw joint label
+            label = joint_labels.get(joint_name, joint_name)
+            label_pos = (x + 15, y - 10)
+            cv2.putText(overlay, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX,
+                       0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(overlay, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX,
+                       0.6, color, 1, cv2.LINE_AA)
 
         return overlay
 

@@ -90,8 +90,14 @@ def main():
             cv2.putText(processed_frame, "DJI Osmo 5 - Live Gait Analysis", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
-            # Show frame
-            cv2.imshow('🎥 DJI Live Gait Analysis (q=quit, s=skeleton, m=metrics, r=reset)', processed_frame)
+            # Show frame with window positioning
+            window_name = '🎥 DJI Live Gait Analysis (q=quit, s=skeleton, m=metrics, r=reset)'
+            cv2.imshow(window_name, processed_frame)
+
+            # Position window on left external monitor (Mac below monitors) and make it stay visible
+            if frame_count == 1:  # Only set position once
+                cv2.moveWindow(window_name, -1400, -800)  # Move to left external monitor (negative Y for above)
+                cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)  # Stay on top
 
             # Handle keys
             key = cv2.waitKey(1) & 0xFF
