@@ -10,6 +10,7 @@ class GaitDashboard {
         this.initializeCharts();
         this.updateStatus();
         this.loadWalkHistory();
+        this.loadSettings();
 
         // Update time and status periodically
         setInterval(() => this.updateTime(), 1000);
@@ -31,6 +32,50 @@ class GaitDashboard {
             this.currentSubjectId = e.target.value || 'default';
             this.loadWalkHistory();
         });
+
+        // Height input change
+        document.getElementById('height-input').addEventListener('change', (e) => {
+            const value = e.target.value;
+            this.updateHeight(value ? parseFloat(value) : null);
+        });
+    }
+
+    async updateHeight(heightCm) {
+        try {
+            const body = {};
+            if (heightCm !== null && heightCm >= 100 && heightCm <= 250) {
+                body.height_cm = heightCm;
+            } else if (heightCm === null || heightCm === '') {
+                body.height_cm = null;
+            } else {
+                this.showStatus('Height must be between 100 and 250 cm', 'error');
+                return;
+            }
+
+            const response = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+
+            if (response.ok) {
+                this.showStatus('Height updated', 'info');
+            }
+        } catch (error) {
+            console.error('Failed to update height:', error);
+        }
+    }
+
+    async loadSettings() {
+        try {
+            const response = await fetch('/api/settings');
+            const result = await response.json();
+            if (result.settings && result.settings.person_height_m) {
+                document.getElementById('height-input').value = Math.round(result.settings.person_height_m * 100);
+            }
+        } catch (error) {
+            console.error('Failed to load settings:', error);
+        }
     }
 
     initializeCharts() {
@@ -270,45 +315,70 @@ class GaitDashboard {
     }
 
     displayAnalysisResults(result) {
-        // Update metric cards
-        document.getElementById('avg-speed').textContent = result.gait_metrics.average_speed.toFixed(4);
-        document.getElementById('duration-value').textContent = result.gait_metrics.duration.toFixed(1);
-        document.getElementById('stride-variability').textContent =
-            (result.gait_metrics.stride_metrics.stride_length_variability || 0).toFixed(3);
+        // Get metrics from new path or fall back to old path
+        const metrics = result.gait_metrics.metrics || result.gait_metrics.stride_metrics || {};
 
-        // Calculate speed variability
-        const speeds = result.speeds_over_time;
-        let speedVariability = 0;
-        if (speeds.length > 1) {
-            const mean = speeds.reduce((a, b) => a + b, 0) / speeds.length;
-            const variance = speeds.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / speeds.length;
-            speedVariability = mean > 0 ? Math.sqrt(variance) / mean : 0;
-        }
-        document.getElementById('speed-variability').textContent = speedVariability.toFixed(3);
+        // Update 8 metric cards
+        document.getElementById('metric-cadence').textContent =
+            (metrics.cadence || 0).toFixed(1);
+        document.getElementById('metric-gait-speed').textContent =
+            (metrics.gait_speed || 0).toFixed(3);
+        document.getElementById('metric-stride-time-cv').textContent =
+            (metrics.stride_time_cv || 0).toFixed(4);
+        document.getElementById('metric-step-asymmetry').textContent =
+            (metrics.step_asymmetry || 0).toFixed(4);
+
+        const avgSwing = ((metrics.swing_phase_pct_left || 0) + (metrics.swing_phase_pct_right || 0)) / 2;
+        document.getElementById('metric-swing-phase').textContent =
+            avgSwing.toFixed(1);
+        document.getElementById('metric-double-support').textContent =
+            (metrics.double_support_pct || 0).toFixed(1);
+        document.getElementById('metric-duration').textContent =
+            (result.gait_metrics.duration || 0).toFixed(1);
+        document.getElementById('metric-stride-length').textContent =
+            (metrics.stride_length || 0).toFixed(3);
 
         // Update speed chart
-        const timeLabels = speeds.map((_, i) => (i / 30).toFixed(1)); // Assuming 30 FPS
-        this.charts.speed.data.labels = timeLabels;
-        this.charts.speed.data.datasets[0].data = speeds;
-        this.charts.speed.update();
+        const speeds = result.speeds_over_time || [];
+        if (speeds.length > 0) {
+            const timeLabels = speeds.map((_, i) => (i / 30).toFixed(1));
+            this.charts.speed.data.labels = timeLabels;
+            this.charts.speed.data.datasets[0].data = speeds;
+            this.charts.speed.update();
+        }
 
         // Update baseline comparison chart
         const baselineData = result.baseline_comparison;
-        const metrics = Object.keys(baselineData);
-        const zScores = Object.values(baselineData);
+        if (baselineData) {
+            const metricLabels = {
+                'gait_speed': 'Gait Speed',
+                'cadence': 'Cadence',
+                'stride_time_left': 'Stride Time L',
+                'stride_time_right': 'Stride Time R',
+                'stride_time_cv': 'Stride Time CV',
+                'step_asymmetry': 'Step Asymmetry',
+                'swing_phase_pct_left': 'Swing % L',
+                'swing_phase_pct_right': 'Swing % R',
+                'double_support_pct': 'Double Support %',
+                'stride_length': 'Stride Length'
+            };
 
-        // Color bars based on z-score magnitude
-        const colors = zScores.map(z => {
-            const abs_z = Math.abs(z);
-            if (abs_z < 1) return '#27ae60'; // Green - normal
-            if (abs_z < 2) return '#f39c12'; // Orange - mild deviation
-            return '#e74c3c'; // Red - significant deviation
-        });
+            const keys = Object.keys(baselineData);
+            const zScores = Object.values(baselineData);
 
-        this.charts.baseline.data.labels = metrics.map(m => m.replace(/_/g, ' '));
-        this.charts.baseline.data.datasets[0].data = zScores;
-        this.charts.baseline.data.datasets[0].backgroundColor = colors;
-        this.charts.baseline.update();
+            // Color bars based on z-score magnitude
+            const colors = zScores.map(z => {
+                const abs_z = Math.abs(z);
+                if (abs_z < 1) return '#27ae60'; // Green - normal
+                if (abs_z < 2) return '#f39c12'; // Orange - mild deviation
+                return '#e74c3c'; // Red - significant deviation
+            });
+
+            this.charts.baseline.data.labels = keys.map(m => metricLabels[m] || m.replace(/_/g, ' '));
+            this.charts.baseline.data.datasets[0].data = zScores;
+            this.charts.baseline.data.datasets[0].backgroundColor = colors;
+            this.charts.baseline.update();
+        }
     }
 
     async loadWalkHistory() {
@@ -319,15 +389,19 @@ class GaitDashboard {
             const historyDiv = document.getElementById('walk-history');
 
             if (result.walks && result.walks.length > 0) {
-                historyDiv.innerHTML = result.walks.map(walk => `
+                historyDiv.innerHTML = result.walks.map(walk => {
+                    const m = walk.metrics || {};
+                    return `
                     <div class="walk-item">
                         <h4>Walk ${walk.walk_id}</h4>
                         <p>Date: ${new Date(walk.timestamp).toLocaleString()}</p>
                         <p>Duration: ${walk.duration.toFixed(1)}s</p>
-                        <p>Average Speed: ${walk.metrics.average_speed.toFixed(4)} units/s</p>
-                        <p>Stride Variability: ${(walk.metrics.stride_length_variability || 0).toFixed(3)}</p>
+                        <p>Cadence: ${(m.cadence || 0).toFixed(1)} steps/min</p>
+                        <p>Gait Speed: ${(m.gait_speed || m.average_speed || 0).toFixed(3)} m/s</p>
+                        <p>Stride Time CV: ${(m.stride_time_cv || 0).toFixed(4)}</p>
                     </div>
-                `).join('');
+                    `;
+                }).join('');
             } else {
                 historyDiv.innerHTML = '<p style="text-align: center; color: #666;">No recorded walks yet</p>';
             }
@@ -370,11 +444,15 @@ class GaitDashboard {
                 this.charts.baseline.data.datasets[0].data = [];
                 this.charts.baseline.update();
 
-                // Clear metric cards
-                document.getElementById('avg-speed').textContent = '-';
-                document.getElementById('duration-value').textContent = '-';
-                document.getElementById('stride-variability').textContent = '-';
-                document.getElementById('speed-variability').textContent = '-';
+                // Clear all 8 metric cards
+                document.getElementById('metric-cadence').textContent = '-';
+                document.getElementById('metric-gait-speed').textContent = '-';
+                document.getElementById('metric-stride-time-cv').textContent = '-';
+                document.getElementById('metric-step-asymmetry').textContent = '-';
+                document.getElementById('metric-swing-phase').textContent = '-';
+                document.getElementById('metric-double-support').textContent = '-';
+                document.getElementById('metric-duration').textContent = '-';
+                document.getElementById('metric-stride-length').textContent = '-';
 
             } else {
                 this.showStatus(`Error: ${result.error}`, 'error');

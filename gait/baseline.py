@@ -34,13 +34,16 @@ class BaselineModel:
 
         # Key metrics to track for baseline
         self.baseline_metrics = [
-            'average_speed',
+            'gait_speed',
+            'cadence',
             'stride_time_left',
             'stride_time_right',
-            'stride_length_left',
-            'stride_length_right',
-            'stride_time_variability',
-            'stride_length_variability'
+            'stride_time_cv',
+            'step_asymmetry',
+            'swing_phase_pct_left',
+            'swing_phase_pct_right',
+            'double_support_pct',
+            'stride_length',
         ]
 
         # Load existing data
@@ -73,13 +76,12 @@ class BaselineModel:
         }
 
         # Extract key metrics for baseline tracking
-        walk_record['metrics']['average_speed'] = walk_results['average_speed']
+        metrics_source = walk_results.get('metrics', {}) or walk_results.get('stride_metrics', {})
+        walk_record['metrics']['average_speed'] = metrics_source.get('gait_speed', walk_results.get('average_speed', 0.0))
 
-        # Add stride metrics
-        stride_metrics = walk_results['stride_metrics']
         for metric in self.baseline_metrics:
-            if metric in stride_metrics:
-                walk_record['metrics'][metric] = stride_metrics[metric]
+            if metric in metrics_source:
+                walk_record['metrics'][metric] = metrics_source[metric]
 
         # Store full results for detailed analysis
         walk_record['full_results'] = walk_results
@@ -120,10 +122,9 @@ class BaselineModel:
         z_scores = {}
 
         # Calculate z-scores for each metric
-        current_metrics = {
-            'average_speed': walk_results['average_speed'],
-            **walk_results['stride_metrics']
-        }
+        metrics_source = walk_results.get('metrics', {}) or walk_results.get('stride_metrics', {})
+        current_metrics = dict(metrics_source)
+        current_metrics.setdefault('average_speed', walk_results.get('average_speed', 0.0))
 
         for metric in self.baseline_metrics:
             if metric in baseline and metric in current_metrics:

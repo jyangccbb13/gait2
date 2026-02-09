@@ -84,7 +84,7 @@ section h2 {
 /* Control Panel */
 .recording-controls {
     display: grid;
-    grid-template-columns: 1fr 1fr 2fr;
+    grid-template-columns: 1fr 1fr 1fr 2fr;
     gap: 20px;
     align-items: end;
 }
@@ -284,6 +284,15 @@ section h2 {
 @keyframes spin {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
+}
+
+.guidance-text {
+    background: #e8f4fd;
+    border-left: 4px solid #3498db;
+    padding: 10px 15px;
+    margin: 10px 0;
+    font-size: 14px;
+    color: #555;
 }
 
 /* Responsive Design */

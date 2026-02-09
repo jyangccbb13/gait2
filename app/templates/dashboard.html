@@ -10,9 +10,9 @@
 <body>
     <div class="container">
         <header>
-            <h1>🚶‍♂️ Gait Analysis System</h1>
+            <h1>Gait Analysis System</h1>
             <div class="status-bar">
-                <span id="status-indicator" class="status-indicator">●</span>
+                <span id="status-indicator" class="status-indicator">&#9679;</span>
                 <span id="status-text">Initializing...</span>
                 <span class="system-time" id="current-time"></span>
             </div>
@@ -31,12 +31,17 @@
                         <label for="subject-id">Subject ID:</label>
                         <input type="text" id="subject-id" value="default" placeholder="Enter subject ID">
                     </div>
+                    <div class="input-group">
+                        <label for="height-input">Height (cm):</label>
+                        <input type="number" id="height-input" min="100" max="250" placeholder="e.g. 175">
+                    </div>
                     <div class="button-group">
                         <button id="start-recording" class="btn btn-primary">Start Recording</button>
                         <button id="stop-recording" class="btn btn-secondary" disabled>Stop Recording</button>
                         <button id="analyze-recording" class="btn btn-success" disabled>Analyze Walk</button>
                     </div>
                 </div>
+                <p class="guidance-text">For best results, record from a sagittal (side) view. Walk perpendicular to the camera so your full stride is visible.</p>
                 <div id="recording-status" class="recording-status"></div>
             </section>
 
@@ -45,24 +50,44 @@
                 <h2>Latest Analysis</h2>
                 <div id="latest-results" class="results-grid">
                     <div class="metric-card">
-                        <h3>Average Speed</h3>
-                        <div class="metric-value" id="avg-speed">-</div>
-                        <div class="metric-unit">units/s</div>
+                        <h3>Cadence</h3>
+                        <div class="metric-value" id="metric-cadence">-</div>
+                        <div class="metric-unit">steps/min</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Gait Speed</h3>
+                        <div class="metric-value" id="metric-gait-speed">-</div>
+                        <div class="metric-unit">m/s</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Stride Time CV</h3>
+                        <div class="metric-value" id="metric-stride-time-cv">-</div>
+                        <div class="metric-unit">ratio</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Step Asymmetry</h3>
+                        <div class="metric-value" id="metric-step-asymmetry">-</div>
+                        <div class="metric-unit">ratio</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Swing Phase %</h3>
+                        <div class="metric-value" id="metric-swing-phase">-</div>
+                        <div class="metric-unit">%</div>
+                    </div>
+                    <div class="metric-card">
+                        <h3>Double Support %</h3>
+                        <div class="metric-value" id="metric-double-support">-</div>
+                        <div class="metric-unit">%</div>
                     </div>
                     <div class="metric-card">
                         <h3>Duration</h3>
-                        <div class="metric-value" id="duration-value">-</div>
+                        <div class="metric-value" id="metric-duration">-</div>
                         <div class="metric-unit">seconds</div>
                     </div>
                     <div class="metric-card">
-                        <h3>Stride Variability</h3>
-                        <div class="metric-value" id="stride-variability">-</div>
-                        <div class="metric-unit">CV</div>
-                    </div>
-                    <div class="metric-card">
-                        <h3>Speed Variability</h3>
-                        <div class="metric-value" id="speed-variability">-</div>
-                        <div class="metric-unit">CV</div>
+                        <h3>Stride Length</h3>
+                        <div class="metric-value" id="metric-stride-length">-</div>
+                        <div class="metric-unit">m</div>
                     </div>
                 </div>
             </section>

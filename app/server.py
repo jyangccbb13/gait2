@@ -22,6 +22,9 @@ from gait.baseline import BaselineModel
 
 app = Flask(__name__)
 
+# User settings
+user_settings = {'person_height_m': None}
+
 # Global objects for video processing
 video_source = None
 pose_estimator = None
@@ -204,6 +207,49 @@ def stop_recording():
     })
 
 
+@app.route('/api/settings', methods=['POST'])
+def update_settings():
+    """Update user settings (e.g. height)."""
+    global user_settings, gait_analyzer
+
+    data = request.get_json() or {}
+    height_cm = data.get('height_cm')
+
+    if height_cm is not None:
+        try:
+            height_cm = float(height_cm)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'height_cm must be a number'}), 400
+
+        if height_cm < 100 or height_cm > 250:
+            return jsonify({'error': 'height_cm must be between 100 and 250'}), 400
+
+        user_settings['person_height_m'] = height_cm / 100.0
+        if gait_analyzer:
+            gait_analyzer.person_height_m = user_settings['person_height_m']
+    else:
+        user_settings['person_height_m'] = None
+        if gait_analyzer:
+            gait_analyzer.person_height_m = None
+
+    return jsonify({
+        'message': 'Settings updated',
+        'settings': {
+            'person_height_m': user_settings['person_height_m'],
+        }
+    })
+
+
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    """Get current user settings."""
+    return jsonify({
+        'settings': {
+            'person_height_m': user_settings['person_height_m'],
+        }
+    })
+
+
 @app.route('/api/record/analyze', methods=['POST'])
 def analyze_recording():
     """Analyze the most recent recording."""
@@ -235,14 +281,16 @@ def analyze_recording():
             'subject_id': subject_id,
             'timestamp': datetime.now().isoformat(),
             'gait_metrics': {
-                'average_speed': gait_results['average_speed'],
+                'average_speed': gait_results.get('average_speed', 0.0),
                 'duration': gait_results['duration'],
                 'frame_count': gait_results['frame_count'],
-                'stride_metrics': gait_results['stride_metrics']
+                'stride_metrics': gait_results.get('stride_metrics', {}),
+                'metrics': gait_results.get('metrics', {}),
             },
             'baseline_comparison': z_scores,
-            'speeds_over_time': gait_results['speeds'],
-            'stride_events': gait_results['stride_events']
+            'speeds_over_time': gait_results.get('speeds', []),
+            'stride_events': gait_results.get('stride_events', {}),
+            'gait_events': gait_results.get('gait_events', {}),
         }
 
         # Clear recording data
@@ -332,9 +380,11 @@ def main():
     print("  POST /api/record/start - Start recording")
     print("  POST /api/record/stop - Stop recording")
     print("  POST /api/record/analyze - Analyze recording")
-    print("  GET /api/walks - Get walk history")
-    print("  GET /api/baseline - Get baseline statistics")
+    print("  GET  /api/walks - Get walk history")
+    print("  GET  /api/baseline - Get baseline statistics")
     print("  POST /api/baseline/reset - Reset baseline")
+    print("  GET  /api/settings - Get current settings")
+    print("  POST /api/settings - Update settings (height_cm)")
 
     # Run Flask app
     app.run(

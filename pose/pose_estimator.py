@@ -1,77 +1,60 @@
 """
-Pose estimation using MediaPipe BlazePose for gait analysis.
-Extracts 2D keypoints focused on lower body joints (hips, knees, ankles).
+Pose estimation using rtmlib RTMW for gait analysis.
+Extracts 2D keypoints for lower body joints including foot landmarks.
 """
 
 import cv2
 import numpy as np
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, Tuple
 
-# Fallback for MediaPipe compatibility issues
 try:
-    import mediapipe as mp
-    MEDIAPIPE_AVAILABLE = True
+    from rtmlib import Wholebody
+    RTMLIB_AVAILABLE = True
 except ImportError:
-    MEDIAPIPE_AVAILABLE = False
-    print("Warning: MediaPipe not available. Using fallback pose estimator.")
+    RTMLIB_AVAILABLE = False
+    print("Warning: rtmlib not available. Using fallback pose estimator.")
+
+
+# COCO-WholeBody keypoint indices for gait-relevant joints
+KEYPOINT_MAP = {
+    'left_hip': 11,
+    'right_hip': 12,
+    'left_knee': 13,
+    'right_knee': 14,
+    'left_ankle': 15,
+    'right_ankle': 16,
+    'left_big_toe': 17,
+    'left_small_toe': 18,
+    'left_heel': 19,
+    'right_big_toe': 20,
+    'right_small_toe': 21,
+    'right_heel': 22,
+}
 
 
 class PoseEstimator:
     """
-    Wrapper for MediaPipe BlazePose to extract lower body keypoints for gait analysis.
+    Wrapper for rtmlib RTMW to extract lower body keypoints for gait analysis.
 
-    Key joints extracted:
-    - Left/Right Hip
-    - Left/Right Knee
-    - Left/Right Ankle
+    Key joints extracted (12 total):
+    - Left/Right Hip, Knee, Ankle
+    - Left/Right Big Toe, Small Toe, Heel
     """
 
-    def __init__(self,
-                 min_detection_confidence: float = 0.3,
-                 min_tracking_confidence: float = 0.3):
-        """
-        Initialize pose estimation model.
+    def __init__(self):
+        self.keypoint_map = KEYPOINT_MAP
 
-        Args:
-            min_detection_confidence: Minimum confidence for pose detection
-            min_tracking_confidence: Minimum confidence for pose tracking
-        """
-        self.min_detection_confidence = min_detection_confidence
-        self.min_tracking_confidence = min_tracking_confidence
-
-        if MEDIAPIPE_AVAILABLE:
-            self.mp_pose = mp.solutions.pose
-            self.mp_drawing = mp.solutions.drawing_utils
-
-            # Initialize pose model
-            self.pose = self.mp_pose.Pose(
-                min_detection_confidence=min_detection_confidence,
-                min_tracking_confidence=min_tracking_confidence
+        if RTMLIB_AVAILABLE:
+            self.wholebody = Wholebody(
+                to_openpose=False,
+                mode='balanced',
+                backend='onnxruntime',
+                device='cpu'
             )
-
-            # Define the key joints we care about for gait analysis
-            self.gait_joints = {
-                'left_hip': self.mp_pose.PoseLandmark.LEFT_HIP,
-                'right_hip': self.mp_pose.PoseLandmark.RIGHT_HIP,
-                'left_knee': self.mp_pose.PoseLandmark.LEFT_KNEE,
-                'right_knee': self.mp_pose.PoseLandmark.RIGHT_KNEE,
-                'left_ankle': self.mp_pose.PoseLandmark.LEFT_ANKLE,
-                'right_ankle': self.mp_pose.PoseLandmark.RIGHT_ANKLE
-            }
-
-            print("PoseEstimator initialized with MediaPipe BlazePose")
+            print("PoseEstimator initialized with rtmlib RTMW")
         else:
-            # Fallback mode - will generate dummy data for testing
-            self.pose = None
-            self.gait_joints = {
-                'left_hip': 'left_hip',
-                'right_hip': 'right_hip',
-                'left_knee': 'left_knee',
-                'right_knee': 'right_knee',
-                'left_ankle': 'left_ankle',
-                'right_ankle': 'right_ankle'
-            }
-            print("PoseEstimator initialized in FALLBACK mode (no MediaPipe)")
+            self.wholebody = None
+            print("PoseEstimator initialized in FALLBACK mode (no rtmlib)")
 
     def estimate_pose(self, frame: np.ndarray) -> Tuple[bool, Optional[Dict]]:
         """
@@ -90,194 +73,63 @@ class PoseEstimator:
             return False, None
 
         try:
-            if MEDIAPIPE_AVAILABLE and self.pose is not None:
-                # Convert BGR to RGB for MediaPipe
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                # Process frame
-                results = self.pose.process(rgb_frame)
-
-                if results.pose_landmarks is None:
-                    return False, None
-
-                # Extract keypoints for gait analysis
-                keypoints = {}
-                landmarks = results.pose_landmarks.landmark
-
-                for joint_name, landmark_idx in self.gait_joints.items():
-                    landmark = landmarks[landmark_idx]
-                    keypoints[joint_name] = {
-                        'x': landmark.x,  # Normalized coordinates (0-1)
-                        'y': landmark.y,
-                        'visibility': landmark.visibility  # Confidence score
-                    }
-
-                return True, keypoints
-            else:
-                # Fallback mode - NO synthetic data to avoid floating skeletons
-                print(f"⚠️  Fallback mode (no MediaPipe) - no pose detected")
+            if not RTMLIB_AVAILABLE or self.wholebody is None:
                 return False, None
+
+            keypoints, scores = self.wholebody(frame)
+
+            if keypoints is None or len(keypoints) == 0:
+                return False, None
+
+            # Take person 0
+            person_kps = keypoints[0]   # shape (133, 2) pixel coords
+            person_scores = scores[0]   # shape (133,)
+
+            h, w = frame.shape[:2]
+
+            # Extract gait-relevant keypoints, normalize to 0-1
+            result = {}
+            for joint_name, idx in self.keypoint_map.items():
+                result[joint_name] = {
+                    'x': float(person_kps[idx][0] / w),
+                    'y': float(person_kps[idx][1] / h),
+                    'visibility': float(person_scores[idx])
+                }
+
+            return True, result
 
         except Exception as e:
             print(f"Error in pose estimation: {e}")
             return False, None
 
-    def is_pose_valid(self, keypoints: Dict, min_visibility: float = 0.2) -> bool:
+    def is_pose_valid(self, keypoints: Dict, min_visibility: float = 0.3) -> bool:
         """
         Check if detected pose is valid for gait analysis.
-        More lenient for demo - prioritize tracking over precision.
+        Requires hips, ankles, and at least one heel above threshold.
         """
         if keypoints is None:
             return False
 
-        # Check required joints exist and are minimally visible
         required_joints = ['left_hip', 'right_hip', 'left_ankle', 'right_ankle']
-
         for joint in required_joints:
             if joint not in keypoints:
                 return False
             if keypoints[joint]['visibility'] < min_visibility:
                 return False
 
+        # At least one heel must be visible
+        heel_visible = (
+            keypoints.get('left_heel', {}).get('visibility', 0) >= min_visibility or
+            keypoints.get('right_heel', {}).get('visibility', 0) >= min_visibility
+        )
+        if not heel_visible:
+            return False
+
         return True
-
-    def _validate_pose_geometry(self, keypoints: Dict) -> bool:
-        """
-        Validate that pose has realistic human geometry.
-        Prevents detection on furniture/objects with enhanced anti-hallucination checks.
-        """
-        try:
-            # Check hip-to-ankle vertical relationship (person should be upright)
-            left_hip_y = keypoints['left_hip']['y']
-            left_ankle_y = keypoints['left_ankle']['y']
-            right_hip_y = keypoints['right_hip']['y']
-            right_ankle_y = keypoints['right_ankle']['y']
-
-            # Hip should be significantly above ankle (person upright)
-            left_height_ratio = (left_ankle_y - left_hip_y)
-            right_height_ratio = (right_ankle_y - right_hip_y)
-
-            if left_height_ratio < 0.15 or right_height_ratio < 0.15:  # At least 15% of frame height
-                return False
-
-            # Check hip width is reasonable (not too wide/narrow)
-            hip_width = abs(keypoints['left_hip']['x'] - keypoints['right_hip']['x'])
-            if hip_width < 0.05 or hip_width > 0.4:  # 5-40% of frame width
-                return False
-
-            # Check ankle spacing is reasonable
-            ankle_width = abs(keypoints['left_ankle']['x'] - keypoints['right_ankle']['x'])
-            if ankle_width > 0.6:  # Maximum 60% of frame width
-                return False
-
-            # Enhanced furniture/object detection prevention
-            # Check for unnatural limb configurations that suggest furniture
-
-            # 1. Check if joints are aligned horizontally (furniture legs)
-            left_hip_x = keypoints['left_hip']['x']
-            right_hip_x = keypoints['right_hip']['x']
-            left_ankle_x = keypoints['left_ankle']['x']
-            right_ankle_x = keypoints['right_ankle']['x']
-
-            # Legs should not be perfectly vertical (suggests table/chair legs)
-            left_leg_horizontal_offset = abs(left_hip_x - left_ankle_x)
-            right_leg_horizontal_offset = abs(right_hip_x - right_ankle_x)
-
-            if left_leg_horizontal_offset < 0.02 and right_leg_horizontal_offset < 0.02:
-                return False  # Too vertical, likely furniture
-
-            # 2. Check for abnormal body proportions
-            torso_width = hip_width
-            leg_separation = ankle_width
-
-            # Human proportions: ankle separation should be similar to hip width ±50%
-            if leg_separation > torso_width * 2.0:  # Legs too far apart
-                return False
-
-            # 3. Check vertical alignment consistency
-            # Hips and ankles should maintain reasonable left-right symmetry
-            hip_y_diff = abs(left_hip_y - right_hip_y)
-            ankle_y_diff = abs(left_ankle_y - right_ankle_y)
-
-            if hip_y_diff > 0.1 or ankle_y_diff > 0.1:  # More than 10% height difference
-                return False  # Unnatural asymmetry
-
-            # Check knee positions are between hip and ankle
-            if 'left_knee' in keypoints and 'right_knee' in keypoints:
-                left_knee_y = keypoints['left_knee']['y']
-                right_knee_y = keypoints['right_knee']['y']
-                left_knee_x = keypoints['left_knee']['x']
-                right_knee_x = keypoints['right_knee']['x']
-
-                # Knee should be between hip and ankle vertically
-                if not (left_hip_y < left_knee_y < left_ankle_y):
-                    return False
-                if not (right_hip_y < right_knee_y < right_ankle_y):
-                    return False
-
-                # Knee should be reasonably positioned horizontally
-                # Check that knee is not too far from the hip-ankle line
-                left_knee_deviation = abs(left_knee_x - (left_hip_x + left_ankle_x) / 2)
-                right_knee_deviation = abs(right_knee_x - (right_hip_x + right_ankle_x) / 2)
-
-                if left_knee_deviation > 0.15 or right_knee_deviation > 0.15:
-                    return False  # Knee too far from natural position
-
-            return True
-
-        except Exception:
-            return False
-
-    def _validate_pose_stability(self, keypoints: Dict) -> bool:
-        """
-        Check for pose stability to avoid jittery false positives.
-        Enhanced with stricter confidence requirements to reduce hallucinations.
-        """
-        try:
-            # Check that all keypoints have reasonable confidence
-            confidences = [joint['visibility'] for joint in keypoints.values()]
-            avg_confidence = sum(confidences) / len(confidences)
-
-            # Super lenient confidence requirement for maximum sensitivity
-            if avg_confidence < 0.2:  # Much more lenient for demo
-                return False
-
-            # Require minimum confidence for critical joints
-            critical_joints = ['left_hip', 'right_hip', 'left_ankle', 'right_ankle']
-            for joint in critical_joints:
-                if keypoints[joint]['visibility'] < 0.1:  # Very lenient threshold
-                    return False
-
-            # Check that pose is roughly symmetric (left/right similar confidence)
-            left_joints = [k for k in keypoints.keys() if 'left' in k]
-            right_joints = [k for k in keypoints.keys() if 'right' in k]
-
-            if len(left_joints) != len(right_joints):
-                return False
-
-            left_avg_conf = sum(keypoints[j]['visibility'] for j in left_joints) / len(left_joints)
-            right_avg_conf = sum(keypoints[j]['visibility'] for j in right_joints) / len(right_joints)
-
-            # Left and right shouldn't differ too much - very lenient
-            if abs(left_avg_conf - right_avg_conf) > 0.7:  # Much more tolerant
-                return False
-
-            # Additional stability check: ensure no extremely low confidence joints
-            min_confidence = min(confidences)
-            if min_confidence < 0.05:  # Extremely low threshold for maximum sensitivity
-                return False
-
-            return True
-
-        except Exception:
-            return False
 
     def get_hip_center(self, keypoints: Dict) -> Optional[Tuple[float, float]]:
         """
         Calculate center point between left and right hips.
-
-        Args:
-            keypoints: Keypoints dictionary from estimate_pose()
 
         Returns:
             Optional[Tuple[float, float]]: (x, y) normalized coordinates of hip center
@@ -297,9 +149,6 @@ class PoseEstimator:
         """
         Get ankle positions for stride detection.
 
-        Args:
-            keypoints: Keypoints dictionary from estimate_pose()
-
         Returns:
             Optional[Dict]: Ankle positions with format:
                            {'left': (x, y), 'right': (x, y)}
@@ -317,14 +166,14 @@ class PoseEstimator:
 
     def draw_skeleton(self, frame: np.ndarray, keypoints: Dict) -> np.ndarray:
         """
-        Draw enhanced pose skeleton overlay with joint labels for demo.
+        Draw pose skeleton overlay with joint labels.
 
         Args:
             frame: Input BGR frame
             keypoints: Keypoints from estimate_pose()
 
         Returns:
-            np.ndarray: Frame with skeleton overlay and labels
+            np.ndarray: Frame with skeleton overlay
         """
         if keypoints is None:
             return frame
@@ -333,67 +182,71 @@ class PoseEstimator:
         h, w = frame.shape[:2]
 
         # Convert normalized coordinates to pixel coordinates
-        pixel_keypoints = {}
+        pixel_kps = {}
         for joint_name, joint_data in keypoints.items():
             x = int(joint_data['x'] * w)
             y = int(joint_data['y'] * h)
-            pixel_keypoints[joint_name] = (x, y)
+            pixel_kps[joint_name] = (x, y)
 
-        # Draw connections between joints with thicker lines
+        # Draw connections
         connections = [
-            ('left_hip', 'right_hip'),      # Hip line
-            ('left_hip', 'left_knee'),      # Left leg
+            ('left_hip', 'right_hip'),
+            ('left_hip', 'left_knee'),
             ('left_knee', 'left_ankle'),
-            ('right_hip', 'right_knee'),    # Right leg
-            ('right_knee', 'right_ankle')
+            ('right_hip', 'right_knee'),
+            ('right_knee', 'right_ankle'),
+            # Foot connections
+            ('left_ankle', 'left_heel'),
+            ('left_ankle', 'left_big_toe'),
+            ('left_big_toe', 'left_small_toe'),
+            ('right_ankle', 'right_heel'),
+            ('right_ankle', 'right_big_toe'),
+            ('right_big_toe', 'right_small_toe'),
         ]
 
         for joint1, joint2 in connections:
-            if joint1 in pixel_keypoints and joint2 in pixel_keypoints:
-                pt1 = pixel_keypoints[joint1]
-                pt2 = pixel_keypoints[joint2]
-                cv2.line(overlay, pt1, pt2, (0, 255, 255), 4)  # Bright yellow lines
+            if joint1 in pixel_kps and joint2 in pixel_kps:
+                pt1 = pixel_kps[joint1]
+                pt2 = pixel_kps[joint2]
+                cv2.line(overlay, pt1, pt2, (0, 255, 255), 4)
 
-        # Draw joints with different colors and labels
-        joint_labels = {
-            'left_hip': 'L Hip',
-            'right_hip': 'R Hip',
-            'left_knee': 'L Knee',
-            'right_knee': 'R Knee',
-            'left_ankle': 'L Ankle',
-            'right_ankle': 'R Ankle'
-        }
-
+        # Joint colors by type
         joint_colors = {
-            'left_hip': (255, 0, 0),    # Blue
-            'right_hip': (255, 0, 0),   # Blue
-            'left_knee': (0, 255, 0),   # Green
-            'right_knee': (0, 255, 0),  # Green
-            'left_ankle': (0, 0, 255),  # Red
-            'right_ankle': (0, 0, 255)  # Red
+            'left_hip': (255, 0, 0), 'right_hip': (255, 0, 0),
+            'left_knee': (0, 255, 0), 'right_knee': (0, 255, 0),
+            'left_ankle': (0, 0, 255), 'right_ankle': (0, 0, 255),
+            'left_big_toe': (255, 0, 255), 'right_big_toe': (255, 0, 255),
+            'left_small_toe': (255, 0, 255), 'right_small_toe': (255, 0, 255),
+            'left_heel': (0, 255, 255), 'right_heel': (0, 255, 255),
         }
 
-        for joint_name, (x, y) in pixel_keypoints.items():
+        joint_labels = {
+            'left_hip': 'L Hip', 'right_hip': 'R Hip',
+            'left_knee': 'L Knee', 'right_knee': 'R Knee',
+            'left_ankle': 'L Ankle', 'right_ankle': 'R Ankle',
+            'left_big_toe': 'L Toe', 'right_big_toe': 'R Toe',
+            'left_small_toe': 'L SToe', 'right_small_toe': 'R SToe',
+            'left_heel': 'L Heel', 'right_heel': 'R Heel',
+        }
+
+        for joint_name, (x, y) in pixel_kps.items():
             color = joint_colors.get(joint_name, (255, 255, 255))
 
-            # Draw joint circle
             cv2.circle(overlay, (x, y), 8, color, -1)
-            cv2.circle(overlay, (x, y), 8, (255, 255, 255), 2)  # White border
+            cv2.circle(overlay, (x, y), 8, (255, 255, 255), 2)
 
-            # Draw joint label
             label = joint_labels.get(joint_name, joint_name)
             label_pos = (x + 15, y - 10)
             cv2.putText(overlay, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX,
-                       0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                        0.6, (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(overlay, label, label_pos, cv2.FONT_HERSHEY_SIMPLEX,
-                       0.6, color, 1, cv2.LINE_AA)
+                        0.6, color, 1, cv2.LINE_AA)
 
         return overlay
 
     def cleanup(self):
-        """Clean up MediaPipe resources."""
-        if MEDIAPIPE_AVAILABLE and hasattr(self, 'pose') and self.pose is not None:
-            self.pose.close()
+        """No-op for interface compatibility."""
+        pass
 
 
 def test_pose_estimator():
@@ -402,10 +255,8 @@ def test_pose_estimator():
 
     print("Testing pose estimator...")
 
-    # Initialize pose estimator
     pose_estimator = PoseEstimator()
 
-    # Test with webcam
     with VideoSource(0) as video:
         if not video.is_connected:
             print("No webcam found for testing")
@@ -418,16 +269,14 @@ def test_pose_estimator():
             if not success:
                 break
 
-            # Run pose estimation
             pose_success, keypoints = pose_estimator.estimate_pose(frame)
 
             if pose_success:
-                print(f"Pose detected - Valid: {pose_estimator.is_pose_valid(keypoints)}")
+                valid = pose_estimator.is_pose_valid(keypoints)
+                print(f"Pose detected - Valid: {valid}, Joints: {len(keypoints)}")
 
-                # Draw skeleton overlay
                 frame_with_pose = pose_estimator.draw_skeleton(frame, keypoints)
 
-                # Get hip center for testing
                 hip_center = pose_estimator.get_hip_center(keypoints)
                 if hip_center:
                     print(f"Hip center: ({hip_center[0]:.3f}, {hip_center[1]:.3f})")
@@ -436,7 +285,6 @@ def test_pose_estimator():
             else:
                 cv2.imshow('Pose Test', frame)
 
-            # Exit on 'q' key
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 

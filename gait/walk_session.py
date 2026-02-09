@@ -185,7 +185,27 @@ class ClinicalGaitAnalyzer:
                 'normal_range': (0.0, 0.04), # CV < 4% is normal
                 'concerning_above': 0.06,    # CV > 6% indicates problems
                 'units': 'coefficient of variation'
-            }
+            },
+            'cadence': {
+                'normal_range': (95, 115),
+                'concerning_below': 80,
+                'units': 'steps/min'
+            },
+            'swing_phase_pct': {
+                'normal_range': (37, 42),
+                'concerning_above': 45,
+                'units': '%'
+            },
+            'double_support_pct': {
+                'normal_range': (10, 20),
+                'concerning_above': 25,
+                'units': '%'
+            },
+            'step_asymmetry': {
+                'normal_range': (0, 0.05),
+                'concerning_above': 0.10,
+                'units': 'ratio'
+            },
         }
 
     def analyze_session(self, session: WalkSession, gait_results: Dict) -> Dict:
@@ -222,10 +242,14 @@ class ClinicalGaitAnalyzer:
         total_score = 0
         scored_metrics = 0
 
+        # Support both new metrics dict and old stride_metrics dict
+        metrics_source = gait_results.get('metrics', {}) or gait_results.get('stride_metrics', {})
+
         for metric_key, reference_key in metrics_to_analyze:
-            if metric_key in gait_results.get('stride_metrics', {}) or metric_key == 'average_speed':
-                value = (gait_results.get(metric_key, 0) if metric_key == 'average_speed'
-                        else gait_results.get('stride_metrics', {}).get(metric_key, 0))
+            if metric_key in metrics_source or metric_key == 'average_speed':
+                value = metrics_source.get(metric_key, 0)
+                if metric_key == 'average_speed' and value == 0:
+                    value = metrics_source.get('gait_speed', gait_results.get('average_speed', 0))
 
                 score, interpretation = self._score_metric(value, reference_key)
                 assessment['clinical_scores'][metric_key] = score

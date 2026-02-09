@@ -1,336 +1,372 @@
 """
 Gait feature extraction from pose keypoint sequences.
-Computes gait speed, stride detection, stride length, and variability metrics.
+Uses velocity-based gait event detection and clinically meaningful metrics.
 """
 
 import numpy as np
-from typing import List, Dict, Tuple, Optional
-from scipy.signal import find_peaks
-import matplotlib.pyplot as plt
+from typing import List, Dict, Optional
+from scipy.signal import butter, filtfilt
+
+BUTTER_ORDER = 4
+BUTTER_CUTOFF_HZ = 6.0
+MIN_STRIDE_TIME = 0.3
+MIN_FILTER_SAMPLES = 15
+HEIGHT_TO_LEG_RATIO = 0.53
+
+# Joint names expected from pose estimator
+JOINT_NAMES = [
+    'left_hip', 'right_hip',
+    'left_knee', 'right_knee',
+    'left_ankle', 'right_ankle',
+    'left_big_toe', 'left_small_toe', 'left_heel',
+    'right_big_toe', 'right_small_toe', 'right_heel',
+]
 
 
 class GaitAnalyzer:
     """
     Analyzes gait patterns from sequence of pose keypoints.
-
-    Computes:
-    - Gait speed from hip displacement
-    - Stride events from ankle movement
-    - Stride length estimates
-    - Temporal and spatial variability
+    Uses velocity-based heel strike and toe off detection.
     """
 
-    def __init__(self, fps: float = 30.0):
-        """
-        Initialize gait analyzer.
-
-        Args:
-            fps: Frames per second of the video source
-        """
+    def __init__(self, fps: float = 30.0, person_height_m: float = None):
         self.fps = fps
         self.frame_duration = 1.0 / fps
+        self.person_height_m = person_height_m
 
-    def compute_gait_speed(self,
-                          keypoint_sequence: List[Dict],
-                          pixel_to_meter_ratio: float = 0.001) -> Tuple[List[float], float]:
+        # Pre-compute Butterworth filter coefficients
+        self._b, self._a = butter(BUTTER_ORDER, BUTTER_CUTOFF_HZ, fs=fps, btype='low')
+
+    def _butterworth_filter(self, signal: np.ndarray) -> np.ndarray:
+        """Apply Butterworth low-pass filter. Returns raw if too few samples."""
+        if len(signal) >= MIN_FILTER_SAMPLES:
+            return filtfilt(self._b, self._a, signal)
+        return signal
+
+    def _extract_trajectories(self, keypoint_sequence: List[Optional[Dict]]):
         """
-        Compute gait speed over time from hip center displacement.
-
-        Args:
-            keypoint_sequence: List of keypoint dictionaries from pose estimation
-            pixel_to_meter_ratio: Conversion factor from pixels to meters (approximate)
+        Extract and filter joint trajectories from keypoint sequence.
 
         Returns:
-            Tuple[List[float], float]: (speed_over_time, average_speed)
-                speed_over_time: Speed at each frame in m/s
-                average_speed: Average walking speed in m/s
+            trajectories: {joint_name: {'x': array, 'y': array}}
+            valid_mask: boolean array indicating which frames had valid data
         """
-        hip_centers = []
-        timestamps = []
+        n_frames = len(keypoint_sequence)
+        valid_mask = np.array([kp is not None for kp in keypoint_sequence])
 
-        # Extract hip centers over time
-        for i, keypoints in enumerate(keypoint_sequence):
-            if keypoints is None:
-                continue
+        trajectories = {}
+        for joint in JOINT_NAMES:
+            x_raw = np.full(n_frames, np.nan)
+            y_raw = np.full(n_frames, np.nan)
 
-            if 'left_hip' in keypoints and 'right_hip' in keypoints:
-                left_hip = keypoints['left_hip']
-                right_hip = keypoints['right_hip']
+            for i, kp in enumerate(keypoint_sequence):
+                if kp is not None and joint in kp:
+                    x_raw[i] = kp[joint]['x']
+                    y_raw[i] = kp[joint]['y']
 
-                # Calculate hip center
-                center_x = (left_hip['x'] + right_hip['x']) / 2
-                center_y = (left_hip['y'] + right_hip['y']) / 2
+            # Interpolate gaps using valid indices
+            valid_idx = np.where(~np.isnan(x_raw))[0]
+            if len(valid_idx) >= 2:
+                all_idx = np.arange(n_frames)
+                x_interp = np.interp(all_idx, valid_idx, x_raw[valid_idx])
+                y_interp = np.interp(all_idx, valid_idx, y_raw[valid_idx])
 
-                hip_centers.append((center_x, center_y))
-                timestamps.append(i * self.frame_duration)
+                x_filtered = self._butterworth_filter(x_interp)
+                y_filtered = self._butterworth_filter(y_interp)
+            elif len(valid_idx) == 1:
+                x_filtered = np.full(n_frames, x_raw[valid_idx[0]])
+                y_filtered = np.full(n_frames, y_raw[valid_idx[0]])
+            else:
+                x_filtered = np.zeros(n_frames)
+                y_filtered = np.zeros(n_frames)
 
-        if len(hip_centers) < 2:
-            return [], 0.0
+            trajectories[joint] = {'x': x_filtered, 'y': y_filtered}
 
-        # Calculate instantaneous speeds
-        speeds = []
-        for i in range(1, len(hip_centers)):
-            # Calculate displacement
-            dx = hip_centers[i][0] - hip_centers[i-1][0]
-            dy = hip_centers[i][1] - hip_centers[i-1][1]
+        return trajectories, valid_mask
 
-            # Convert to meters (very approximate)
-            displacement = np.sqrt(dx**2 + dy**2) * pixel_to_meter_ratio
+    def _compute_velocity(self, position_array: np.ndarray) -> np.ndarray:
+        """Compute velocity from position using numpy gradient."""
+        return np.gradient(position_array) * self.fps
 
-            # Calculate speed
-            speed = displacement / self.frame_duration
-            speeds.append(speed)
-
-        # Smooth speeds to reduce noise
-        if len(speeds) > 5:
-            speeds = self._smooth_signal(speeds, window_size=5)
-
-        average_speed = np.mean(speeds) if speeds else 0.0
-
-        return speeds, average_speed
-
-    def detect_stride_events(self,
-                           keypoint_sequence: List[Dict],
-                           min_stride_time: float = 0.3) -> Dict[str, List[int]]:
+    def _find_zero_crossings_neg(self, signal: np.ndarray, min_distance: int) -> List[int]:
         """
-        Detect stride events (heel strikes) from ankle movement patterns.
+        Find positive-to-negative zero crossings in a signal.
+        Enforces minimum distance between crossings.
+        """
+        crossings = []
+        for i in range(1, len(signal)):
+            if signal[i - 1] >= 0 and signal[i] < 0:
+                if not crossings or (i - crossings[-1]) >= min_distance:
+                    crossings.append(i)
+        return crossings
 
-        Args:
-            keypoint_sequence: List of keypoint dictionaries
-            min_stride_time: Minimum time between strides in seconds
+    def detect_gait_events(self, keypoint_sequence: List[Optional[Dict]]) -> Dict[str, List[int]]:
+        """
+        Detect heel strikes and toe offs using velocity-based method.
+
+        Heel strike: positive-to-negative zero crossing in heel Y velocity
+        Toe off: positive-to-negative zero crossing in big toe Y velocity
 
         Returns:
-            Dict[str, List[int]]: Stride event frame indices for each foot
-                                 {'left': [frame_idx, ...], 'right': [frame_idx, ...]}
+            Dict with keys: left_heel_strikes, right_heel_strikes,
+                           left_toe_offs, right_toe_offs
         """
-        left_ankle_y = []
-        right_ankle_y = []
-        valid_frames = []
+        trajectories, valid_mask = self._extract_trajectories(keypoint_sequence)
 
-        # Extract ankle y-coordinates over time
-        for i, keypoints in enumerate(keypoint_sequence):
-            if keypoints is None:
-                continue
+        min_dist = int(MIN_STRIDE_TIME * self.fps)
 
-            if ('left_ankle' in keypoints and 'right_ankle' in keypoints):
-                left_ankle_y.append(keypoints['left_ankle']['y'])
-                right_ankle_y.append(keypoints['right_ankle']['y'])
-                valid_frames.append(i)
-
-        if len(left_ankle_y) < 10:
-            return {'left': [], 'right': []}
-
-        # Convert to numpy arrays
-        left_ankle_y = np.array(left_ankle_y)
-        right_ankle_y = np.array(right_ankle_y)
-
-        # Find peaks (maximum y values indicate stance phase)
-        min_distance = int(min_stride_time * self.fps)
-
-        # Find stride events for left foot
-        left_peaks, _ = find_peaks(left_ankle_y,
-                                  distance=min_distance,
-                                  prominence=0.01)
-
-        # Find stride events for right foot
-        right_peaks, _ = find_peaks(right_ankle_y,
-                                   distance=min_distance,
-                                   prominence=0.01)
-
-        # Convert back to original frame indices
-        left_stride_frames = [valid_frames[i] for i in left_peaks if i < len(valid_frames)]
-        right_stride_frames = [valid_frames[i] for i in right_peaks if i < len(valid_frames)]
-
-        return {
-            'left': left_stride_frames,
-            'right': right_stride_frames
+        events = {
+            'left_heel_strikes': [],
+            'right_heel_strikes': [],
+            'left_toe_offs': [],
+            'right_toe_offs': [],
         }
 
-    def compute_stride_metrics(self,
-                             keypoint_sequence: List[Dict],
-                             stride_events: Dict[str, List[int]]) -> Dict[str, float]:
+        # Left heel strikes from left_heel Y velocity
+        left_heel_vy = self._compute_velocity(trajectories['left_heel']['y'])
+        events['left_heel_strikes'] = self._find_zero_crossings_neg(left_heel_vy, min_dist)
+
+        # Right heel strikes from right_heel Y velocity
+        right_heel_vy = self._compute_velocity(trajectories['right_heel']['y'])
+        events['right_heel_strikes'] = self._find_zero_crossings_neg(right_heel_vy, min_dist)
+
+        # Left toe off from left_big_toe Y velocity
+        left_toe_vy = self._compute_velocity(trajectories['left_big_toe']['y'])
+        events['left_toe_offs'] = self._find_zero_crossings_neg(left_toe_vy, min_dist)
+
+        # Right toe off from right_big_toe Y velocity
+        right_toe_vy = self._compute_velocity(trajectories['right_big_toe']['y'])
+        events['right_toe_offs'] = self._find_zero_crossings_neg(right_toe_vy, min_dist)
+
+        return events
+
+    def compute_metrics(self, keypoint_sequence: List[Optional[Dict]],
+                       gait_events: Dict[str, List[int]]) -> Dict[str, float]:
         """
-        Compute stride length and temporal metrics.
+        Compute temporal and spatial gait metrics.
 
-        Args:
-            keypoint_sequence: List of keypoint dictionaries
-            stride_events: Stride event frame indices from detect_stride_events()
-
-        Returns:
-            Dict[str, float]: Stride metrics including:
-                - stride_length_left/right: Average stride length (normalized units)
-                - stride_time_left/right: Average stride time in seconds
-                - stride_length_variability: Coefficient of variation for stride length
-                - stride_time_variability: Coefficient of variation for stride time
+        Returns dict with: cadence, stride_time_left/right, step_time_left/right,
+        stride_time_cv, swing_phase_pct_left/right, stance_phase_pct_left/right,
+        double_support_pct, step_asymmetry, and if person_height_m set:
+        stride_length, gait_speed.
         """
         metrics = {}
+        n_frames = len(keypoint_sequence)
+        duration = n_frames * self.frame_duration
 
-        for foot in ['left', 'right']:
-            events = stride_events[foot]
-            if len(events) < 2:
-                metrics[f'stride_length_{foot}'] = 0.0
-                metrics[f'stride_time_{foot}'] = 0.0
-                continue
+        lhs = gait_events.get('left_heel_strikes', [])
+        rhs = gait_events.get('right_heel_strikes', [])
+        lto = gait_events.get('left_toe_offs', [])
+        rto = gait_events.get('right_toe_offs', [])
 
-            # Calculate stride times
-            stride_times = []
+        total_heel_strikes = len(lhs) + len(rhs)
+
+        # Cadence: total heel strikes / duration * 60
+        metrics['cadence'] = (total_heel_strikes / duration * 60.0) if duration > 0 else 0.0
+
+        # Stride times (consecutive same-foot heel strikes)
+        left_stride_times = []
+        for i in range(1, len(lhs)):
+            left_stride_times.append((lhs[i] - lhs[i - 1]) * self.frame_duration)
+
+        right_stride_times = []
+        for i in range(1, len(rhs)):
+            right_stride_times.append((rhs[i] - rhs[i - 1]) * self.frame_duration)
+
+        metrics['stride_time_left'] = float(np.mean(left_stride_times)) if left_stride_times else 0.0
+        metrics['stride_time_right'] = float(np.mean(right_stride_times)) if right_stride_times else 0.0
+
+        # Step times (alternating-foot heel strikes)
+        # Merge and sort all heel strikes with foot labels
+        all_hs = sorted([(f, 'L') for f in lhs] + [(f, 'R') for f in rhs])
+        left_step_times = []
+        right_step_times = []
+        for i in range(1, len(all_hs)):
+            if all_hs[i][1] != all_hs[i - 1][1]:
+                step_t = (all_hs[i][0] - all_hs[i - 1][0]) * self.frame_duration
+                if all_hs[i][1] == 'L':
+                    left_step_times.append(step_t)
+                else:
+                    right_step_times.append(step_t)
+
+        metrics['step_time_left'] = float(np.mean(left_step_times)) if left_step_times else 0.0
+        metrics['step_time_right'] = float(np.mean(right_step_times)) if right_step_times else 0.0
+
+        # Stride time CV
+        all_stride_times = left_stride_times + right_stride_times
+        if len(all_stride_times) >= 2:
+            mean_st = np.mean(all_stride_times)
+            std_st = np.std(all_stride_times)
+            metrics['stride_time_cv'] = float(std_st / mean_st) if mean_st > 0 else 0.0
+        else:
+            metrics['stride_time_cv'] = 0.0
+
+        # Swing and stance phase percentages
+        # Swing: time from toe off to next heel strike (same foot)
+        # Stance: time from heel strike to toe off (same foot)
+        for side, hs_list, to_list, label in [
+            ('left', lhs, lto, 'left'),
+            ('right', rhs, rto, 'right'),
+        ]:
+            swing_pcts = []
+            stance_pcts = []
+            stride_t = metrics[f'stride_time_{label}']
+
+            if stride_t > 0:
+                # For each heel strike, find the next toe off after it (stance end)
+                for hs_frame in hs_list:
+                    # Find toe off after this heel strike
+                    to_after = [t for t in to_list if t > hs_frame]
+                    if to_after:
+                        stance_dur = (to_after[0] - hs_frame) * self.frame_duration
+                        stance_pcts.append(stance_dur / stride_t * 100.0)
+
+                # For each toe off, find the next heel strike after it (swing end)
+                for to_frame in to_list:
+                    hs_after = [h for h in hs_list if h > to_frame]
+                    if hs_after:
+                        swing_dur = (hs_after[0] - to_frame) * self.frame_duration
+                        swing_pcts.append(swing_dur / stride_t * 100.0)
+
+            metrics[f'swing_phase_pct_{label}'] = float(np.mean(swing_pcts)) if swing_pcts else 0.0
+            metrics[f'stance_phase_pct_{label}'] = float(np.mean(stance_pcts)) if stance_pcts else 0.0
+
+        # Double support percentage
+        avg_stance = (metrics.get('stance_phase_pct_left', 0) + metrics.get('stance_phase_pct_right', 0)) / 2
+        avg_swing = (metrics.get('swing_phase_pct_left', 0) + metrics.get('swing_phase_pct_right', 0)) / 2
+        metrics['double_support_pct'] = max(0.0, avg_stance - avg_swing) if avg_stance > 0 else 0.0
+
+        # Step asymmetry
+        mean_step = (metrics['step_time_left'] + metrics['step_time_right']) / 2
+        if mean_step > 0:
+            metrics['step_asymmetry'] = abs(metrics['step_time_left'] - metrics['step_time_right']) / mean_step
+        else:
+            metrics['step_asymmetry'] = 0.0
+
+        # Spatial metrics (only if person_height_m is set)
+        if self.person_height_m is not None and self.person_height_m > 0:
+            trajectories, _ = self._extract_trajectories(keypoint_sequence)
+
+            # Estimate leg length in pixels from hip-ankle distance
+            hip_y = (trajectories['left_hip']['y'] + trajectories['right_hip']['y']) / 2
+            ankle_y = (trajectories['left_ankle']['y'] + trajectories['right_ankle']['y']) / 2
+            leg_pixel = float(np.mean(np.abs(ankle_y - hip_y)))
+
+            leg_m = self.person_height_m * HEIGHT_TO_LEG_RATIO
+            pixel_to_m = leg_m / leg_pixel if leg_pixel > 0 else 0.0
+
+            # Stride length from hip X displacement between heel strikes
             stride_lengths = []
+            hip_x = (trajectories['left_hip']['x'] + trajectories['right_hip']['x']) / 2
 
-            for i in range(1, len(events)):
-                # Stride time
-                time_diff = (events[i] - events[i-1]) * self.frame_duration
-                stride_times.append(time_diff)
+            for hs_list in [lhs, rhs]:
+                for i in range(1, len(hs_list)):
+                    dx = abs(hip_x[hs_list[i]] - hip_x[hs_list[i - 1]])
+                    stride_lengths.append(dx * pixel_to_m)
 
-                # Stride length (approximate from hip displacement)
-                start_frame = events[i-1]
-                end_frame = events[i]
+            metrics['stride_length'] = float(np.mean(stride_lengths)) if stride_lengths else 0.0
 
-                if (start_frame < len(keypoint_sequence) and
-                    end_frame < len(keypoint_sequence) and
-                    keypoint_sequence[start_frame] is not None and
-                    keypoint_sequence[end_frame] is not None):
-
-                    start_keypoints = keypoint_sequence[start_frame]
-                    end_keypoints = keypoint_sequence[end_frame]
-
-                    if ('left_hip' in start_keypoints and 'left_hip' in end_keypoints and
-                        'right_hip' in start_keypoints and 'right_hip' in end_keypoints):
-
-                        # Hip center at start
-                        start_x = (start_keypoints['left_hip']['x'] + start_keypoints['right_hip']['x']) / 2
-                        # Hip center at end
-                        end_x = (end_keypoints['left_hip']['x'] + end_keypoints['right_hip']['x']) / 2
-
-                        stride_length = abs(end_x - start_x)
-                        stride_lengths.append(stride_length)
-
-            # Store metrics
-            metrics[f'stride_time_{foot}'] = np.mean(stride_times) if stride_times else 0.0
-            metrics[f'stride_length_{foot}'] = np.mean(stride_lengths) if stride_lengths else 0.0
-
-            # Store raw data for variability calculation
-            metrics[f'_stride_times_{foot}'] = stride_times
-            metrics[f'_stride_lengths_{foot}'] = stride_lengths
-
-        # Calculate variability metrics (coefficient of variation)
-        all_stride_times = (metrics.get('_stride_times_left', []) +
-                           metrics.get('_stride_times_right', []))
-        all_stride_lengths = (metrics.get('_stride_lengths_left', []) +
-                            metrics.get('_stride_lengths_right', []))
-
-        metrics['stride_time_variability'] = self._coefficient_of_variation(all_stride_times)
-        metrics['stride_length_variability'] = self._coefficient_of_variation(all_stride_lengths)
-
-        # Clean up temporary data
-        keys_to_remove = [k for k in metrics.keys() if k.startswith('_')]
-        for key in keys_to_remove:
-            del metrics[key]
+            # Gait speed
+            mean_stride_time = np.mean(all_stride_times) if all_stride_times else 0.0
+            if mean_stride_time > 0 and metrics['stride_length'] > 0:
+                metrics['gait_speed'] = metrics['stride_length'] / mean_stride_time
+            else:
+                metrics['gait_speed'] = 0.0
+        else:
+            metrics['stride_length'] = 0.0
+            metrics['gait_speed'] = 0.0
 
         return metrics
 
-    def analyze_walk(self, keypoint_sequence: List[Dict]) -> Dict[str, any]:
+    def analyze_walk(self, keypoint_sequence: List[Optional[Dict]]) -> Dict:
         """
         Complete gait analysis pipeline for a walking sequence.
 
-        Args:
-            keypoint_sequence: List of keypoint dictionaries from pose estimation
-
-        Returns:
-            Dict[str, any]: Complete gait analysis results including:
-                - speeds: Speed over time
-                - average_speed: Mean walking speed
-                - stride_events: Frame indices of stride events
-                - stride_metrics: Stride length and timing metrics
-                - duration: Total walking duration in seconds
+        Returns dict with:
+            metrics, gait_events, duration, frame_count, fps,
+            and backward-compat keys: average_speed, stride_metrics, stride_events
         """
-        # Compute gait speed
-        speeds, average_speed = self.compute_gait_speed(keypoint_sequence)
+        gait_events = self.detect_gait_events(keypoint_sequence)
+        metrics = self.compute_metrics(keypoint_sequence, gait_events)
 
-        # Detect stride events
-        stride_events = self.detect_stride_events(keypoint_sequence)
-
-        # Compute stride metrics
-        stride_metrics = self.compute_stride_metrics(keypoint_sequence, stride_events)
-
-        # Calculate total duration
         duration = len(keypoint_sequence) * self.frame_duration
 
         return {
-            'speeds': speeds,
-            'average_speed': average_speed,
-            'stride_events': stride_events,
-            'stride_metrics': stride_metrics,
+            'metrics': metrics,
+            'gait_events': gait_events,
             'duration': duration,
             'frame_count': len(keypoint_sequence),
-            'fps': self.fps
+            'fps': self.fps,
+            # Backward compatibility
+            'average_speed': metrics.get('gait_speed', 0.0),
+            'stride_metrics': dict(metrics),
+            'stride_events': {
+                'left': gait_events.get('left_heel_strikes', []),
+                'right': gait_events.get('right_heel_strikes', []),
+            },
+            'speeds': [],
         }
-
-    def _smooth_signal(self, signal: List[float], window_size: int = 5) -> List[float]:
-        """Apply simple moving average smoothing to a signal."""
-        if len(signal) <= window_size:
-            return signal
-
-        smoothed = []
-        for i in range(len(signal)):
-            start = max(0, i - window_size // 2)
-            end = min(len(signal), i + window_size // 2 + 1)
-            smoothed.append(np.mean(signal[start:end]))
-
-        return smoothed
-
-    def _coefficient_of_variation(self, values: List[float]) -> float:
-        """Calculate coefficient of variation (std/mean) for a list of values."""
-        if not values or len(values) < 2:
-            return 0.0
-
-        mean_val = np.mean(values)
-        if mean_val == 0:
-            return 0.0
-
-        std_val = np.std(values)
-        return std_val / mean_val
 
 
 def test_gait_analyzer():
     """Test function for gait analysis with synthetic data."""
     print("Testing gait analyzer with synthetic data...")
 
-    # Create synthetic walking data
     frames = 300  # 10 seconds at 30 FPS
+    fps = 30.0
     keypoint_sequence = []
 
     for i in range(frames):
-        # Simulate walking motion
-        t = i / 30.0  # Time in seconds
+        t = i / fps
+        # Simulate ~1.1s stride cycle (~55 cadence per foot, ~110 total)
+        walking_freq = 0.9  # Hz per foot (stride freq)
+        phase = 2 * np.pi * walking_freq * t
 
-        # Simulate forward movement
-        forward_progress = t * 0.1  # Moving forward
+        # Forward movement
+        forward = t * 0.05
 
-        # Simulate walking oscillation
-        walking_cycle = np.sin(2 * np.pi * t * 1.2)  # 1.2 Hz walking
+        # Heel Y: oscillates up and down (heel strike = peak descending)
+        left_heel_y = 0.85 + 0.03 * np.sin(phase)
+        right_heel_y = 0.85 + 0.03 * np.sin(phase + np.pi)
+
+        # Big toe Y: similar but phase-shifted (toe off = peak descending)
+        left_toe_y = 0.84 + 0.025 * np.sin(phase + 0.5)
+        right_toe_y = 0.84 + 0.025 * np.sin(phase + np.pi + 0.5)
 
         keypoints = {
-            'left_hip': {'x': 0.45 + forward_progress, 'y': 0.4, 'visibility': 0.9},
-            'right_hip': {'x': 0.55 + forward_progress, 'y': 0.4, 'visibility': 0.9},
-            'left_ankle': {'x': 0.45 + forward_progress + 0.1 * walking_cycle,
-                          'y': 0.8 + 0.02 * abs(walking_cycle), 'visibility': 0.9},
-            'right_ankle': {'x': 0.55 + forward_progress - 0.1 * walking_cycle,
-                           'y': 0.8 + 0.02 * abs(-walking_cycle), 'visibility': 0.9}
+            'left_hip': {'x': 0.48 + forward, 'y': 0.4, 'visibility': 0.9},
+            'right_hip': {'x': 0.52 + forward, 'y': 0.4, 'visibility': 0.9},
+            'left_knee': {'x': 0.47 + forward, 'y': 0.6, 'visibility': 0.9},
+            'right_knee': {'x': 0.53 + forward, 'y': 0.6, 'visibility': 0.9},
+            'left_ankle': {'x': 0.46 + forward + 0.02 * np.sin(phase), 'y': 0.78, 'visibility': 0.9},
+            'right_ankle': {'x': 0.54 + forward + 0.02 * np.sin(phase + np.pi), 'y': 0.78, 'visibility': 0.9},
+            'left_big_toe': {'x': 0.45 + forward, 'y': left_toe_y, 'visibility': 0.8},
+            'left_small_toe': {'x': 0.44 + forward, 'y': left_toe_y + 0.005, 'visibility': 0.7},
+            'left_heel': {'x': 0.47 + forward, 'y': left_heel_y, 'visibility': 0.8},
+            'right_big_toe': {'x': 0.55 + forward, 'y': right_toe_y, 'visibility': 0.8},
+            'right_small_toe': {'x': 0.56 + forward, 'y': right_toe_y + 0.005, 'visibility': 0.7},
+            'right_heel': {'x': 0.53 + forward, 'y': right_heel_y, 'visibility': 0.8},
         }
         keypoint_sequence.append(keypoints)
 
-    # Analyze the synthetic walk
-    analyzer = GaitAnalyzer(fps=30.0)
+    analyzer = GaitAnalyzer(fps=fps, person_height_m=1.75)
     results = analyzer.analyze_walk(keypoint_sequence)
 
+    metrics = results['metrics']
     print(f"Analysis results:")
     print(f"  Duration: {results['duration']:.2f} seconds")
-    print(f"  Average speed: {results['average_speed']:.4f} normalized units/s")
-    print(f"  Left strides detected: {len(results['stride_events']['left'])}")
-    print(f"  Right strides detected: {len(results['stride_events']['right'])}")
-    print(f"  Stride time variability: {results['stride_metrics']['stride_time_variability']:.3f}")
-    print(f"  Stride length variability: {results['stride_metrics']['stride_length_variability']:.3f}")
-
+    print(f"  Cadence: {metrics['cadence']:.1f} steps/min")
+    print(f"  Stride time L: {metrics['stride_time_left']:.3f}s")
+    print(f"  Stride time R: {metrics['stride_time_right']:.3f}s")
+    print(f"  Stride time CV: {metrics['stride_time_cv']:.4f}")
+    print(f"  Step asymmetry: {metrics['step_asymmetry']:.4f}")
+    print(f"  Swing phase L: {metrics['swing_phase_pct_left']:.1f}%")
+    print(f"  Swing phase R: {metrics['swing_phase_pct_right']:.1f}%")
+    print(f"  Double support: {metrics['double_support_pct']:.1f}%")
+    print(f"  Stride length: {metrics['stride_length']:.3f} m")
+    print(f"  Gait speed: {metrics['gait_speed']:.3f} m/s")
+    print(f"  Left HS events: {len(results['gait_events']['left_heel_strikes'])}")
+    print(f"  Right HS events: {len(results['gait_events']['right_heel_strikes'])}")
     print("Gait analyzer test completed successfully")
 
 
